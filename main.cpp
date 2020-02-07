@@ -16,6 +16,9 @@
 // limitations under the License.
 // ----------------------------------------------------------------------------
 
+#include "psa/error.h"
+#include "psa/crypto.h"
+#include "psa_initial_attestation_api.h"
 #include "simplem2mclient.h"
 #ifdef TARGET_LIKE_MBED
 #include "mbed.h"
@@ -135,6 +138,50 @@ void factory_reset(void *)
     }
 }
 
+void print_buf(const char *label, const uint8_t *buf, uint32_t buf_sz)
+{
+    printf("%s (@%p) (%lu bytes):\n", label, buf, buf_sz);
+    for (uint32_t i = 0; i < buf_sz; i++)
+        printf("%02x", buf[i]);
+    printf("\n");
+}
+
+void attest_callback(void *)
+{
+#define TEST_TOKEN_SIZE (0x200)
+
+    psa_attest_err_t rc = PSA_ATTEST_ERR_SUCCESS;
+    uint8_t t[TEST_TOKEN_SIZE] = {},
+            c[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32] = {};
+    uint32_t t_sz;
+
+    printf("Synchronous attestation resource called with input: %s\n", "(TODO extract input from request)");
+
+    rc = psa_initial_attest_get_token_size(sizeof c, &t_sz);
+    if (rc != PSA_ATTEST_ERR_SUCCESS) {
+        printf("Getting initial attestation token size failed with status %d\n", rc);
+        return;
+    }
+
+    // XXX(tho) -- not sure about the semantics of the "token_size" argument to
+    // psa_initial_attest_get_token(..., uint32_t *token_size).  I'd have
+    // expected this to be a value-result argument that the caller uses to tell
+    // the callee the size of memory allocated to the token buffer, and (on
+    // success) the callee fills with the actual length of the produced token.
+    // This doesn't seem to be the case though: in fact, if I pass: t_sz = 512;
+    // the returned value is unchanged, while the token is effectively 438
+    // bytes worth.
+    // So, it looks like calling psa_initial_attest_get_token_size() is
+    // necessary after all?
+    rc  = psa_initial_attest_get_token(c, sizeof c, t, &t_sz);
+    if (rc != PSA_ATTEST_ERR_SUCCESS) {
+        printf("PSA attestation failed with status %d\n", rc);
+        return;
+    }
+
+    print_buf("PSA token", t, t_sz);
+}
+
 void main_application(void)
 {
 #if defined(__linux__) && (MBED_CONF_MBED_TRACE_ENABLE == 0)
@@ -191,6 +238,12 @@ void main_application(void)
         return;
     }
 
+    psa_status_t rc = psa_crypto_init();
+    if (rc != PSA_SUCCESS) {
+        printf("PSA crypto initialisation failed with status %ld, exiting application!\n", rc);
+        return;
+    }
+
     // Save pointer to mbedClient so that other functions can access it.
     client = &mbedClient;
 
@@ -225,6 +278,12 @@ void main_application(void)
     // Create resource for running factory reset for the device. Path of this resource will be: 5000/0/2.
     mbedClient.add_cloud_resource(5000, 0, 2, "factory_reset", M2MResourceInstance::STRING,
                  M2MBase::POST_ALLOWED, NULL, false, (void*)factory_reset, NULL);
+
+    // register the synchronous PSA attestation resource at "/33455/0/0"
+    mbedClient.add_cloud_resource(33455, 0, 0, "synchronous_attestation",
+        M2MResourceInstance::OPAQUE, M2MBase::POST_ALLOWED, "", false,
+        (void*)attest_callback, NULL);
+
 #endif
 
     mbedClient.register_and_connect();
