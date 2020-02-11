@@ -58,7 +58,8 @@ int main(void)
 static M2MResource* button_res;
 static M2MResource* pattern_res;
 static M2MResource* blink_res;
-static M2MResource* attest_sync_res;
+static M2MResource* attested_sensor_nonce_res;
+static M2MResource* attested_sensor_value_res;
 
 // Pointer to mbedClient, used for calling close function.
 static SimpleM2MClient *client;
@@ -154,7 +155,7 @@ void attest(const uint8_t *nonce, uint16_t nonce_sz)
     uint8_t t[MAX_ATTESTATION_TOKEN_SIZE] = {};
     uint32_t t_sz;
 
-    printf("Synchronous attestation resource\n");
+    printf("computing attestation resource\n");
     print_buf("nonce", nonce, nonce_sz);
 
     rc = psa_initial_attest_get_token_size(nonce_sz, &t_sz);
@@ -181,28 +182,25 @@ void attest(const uint8_t *nonce, uint16_t nonce_sz)
 
     print_buf("PSA token", t, t_sz);
 
-    attest_sync_res->set_value(t, t_sz);
+    attested_sensor_value_res->set_value(t, t_sz);
 }
 
-static bool extract_nonce_from_args(const uint8_t *args, uint16_t args_sz,
-    uint8_t *nonce, uint16_t *pnonce_sz)
+// assume args is hex-encoded
+static bool extract_nonce_from_args(const uint8_t *args, size_t args_sz, uint8_t *nonce, size_t *pnonce_sz)
 {
-    const char *nonce_key = "nonce=";
-    uint16_t nonce_sz;
-
     print_buf("args", args, args_sz);
 
-    if (memcmp(args, (const void *) nonce_key, strlen(nonce_key)) != 0) {
-        printf("no nonce key\n");
-        return false;
-    }
-
-    if (args_sz < strlen(nonce_key)) {
+    if (args_sz == 0) {
         printf("no nonce\n");
         return false;
     }
 
-    nonce_sz = args_sz - strlen(nonce_key);
+    if (args_sz % 2) {
+        printf("nonce should be an even number of chars\n");
+        return false;
+    }
+
+    size_t nonce_sz = args_sz / 2;
 
     switch (nonce_sz) {
         case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64:
@@ -210,51 +208,56 @@ static bool extract_nonce_from_args(const uint8_t *args, uint16_t args_sz,
         case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32:
             break;
         default:
-            printf("bad nonce size (%u)\n");
+            printf("bad nonce size (%zu)\n", nonce_sz);
             return false;
     }
 
-    if (nonce_sz < *pnonce_sz) {
-        printf("not enough space in the supplied buffer\n");
+    if (nonce_sz > *pnonce_sz) {
+        printf("not enough space in the supplied buffer (%zu v %zu)\n", nonce_sz, *pnonce_sz);
         return false;
     }
 
-    memcpy(nonce, args + strlen(nonce_key), nonce_sz);
+    const char *pos = (const char *)args; // XXX(tho)
+    size_t count = 0;
+
+    for (; count < nonce_sz; count++) {
+        if (sscanf(pos, "%2hhx", &nonce[count]) != 1) {
+            printf("bad hex value at position %zu\n", count);
+            return false;
+        }
+        pos += 2;
+    }
+
+    *pnonce_sz = nonce_sz;
 
     return true;
 }
 
-static void attest_sync_callback(void *_parameters)
+static void attested_sensor_reading_callback(void *)
 {
-    attest_sync_res->set_value(NULL, 0);
+    // clear previous result as soon as we receive a new request
+    attested_sensor_value_res->set_value(NULL, 0);
 
-    if (_parameters) {
-        M2MResource::M2MExecuteParameter *parameters =
-          static_cast<M2MResource::M2MExecuteParameter *>(_parameters);
+    const uint8_t *nonce_hex = attested_sensor_nonce_res->value();
+    const size_t nonce_hex_sz = attested_sensor_nonce_res->value_length();
 
-          const uint8_t *args = parameters->get_argument_value();
-          uint16_t args_sz = parameters->get_argument_value_length();
+    // use the largest possible nonce size (64 bytes)
+    uint8_t nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64];
+    size_t nonce_sz = sizeof nonce;
 
-          // use the largest possible nonce size (64 bytes)
-          uint8_t nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64];
-          uint16_t nonce_sz = sizeof nonce;
-
-          if (!extract_nonce_from_args(args, args_sz, nonce, &nonce_sz)) {
-              printf("Failed extracting nonce from Execute arguments\n");
-              // XXX(tho) it looks like returning here leaves the resource in
-              // confused state... Pelion needs to timeout before it can
-              // request again.  TODO(tho) how do we send an error?
-              return;
-          }
-
-          // TODO(tho) we should immediately ack because we don't know how long
-          // will it take to respond with the token.  Is that taken care of
-          // automatically by the API?
-
-          attest(nonce, nonce_sz);
-
-          attest_sync_res->send_delayed_post_response();
+    if (!extract_nonce_from_args(nonce_hex, nonce_hex_sz, nonce, &nonce_sz)) {
+        printf("Failed extracting nonce from PUT request\n");
+        // XXX(tho) it looks like returning here leaves the resource in
+        // confused state... Pelion needs to timeout before it can
+        // request again.  TODO(tho) how do we send an error?
+        return;
     }
+
+    // TODO(tho) we should immediately ack because we don't know how long
+    // will it take to respond with the token.  Is that taken care of
+    // automatically by the API?
+
+    attest(nonce, nonce_sz);
 }
 
 void main_application(void)
@@ -354,12 +357,14 @@ void main_application(void)
     mbedClient.add_cloud_resource(5000, 0, 2, "factory_reset", M2MResourceInstance::STRING,
                  M2MBase::GET_POST_ALLOWED, NULL, false, (void*)factory_reset, NULL);
 
-    // register the synchronous PSA attestation resource at "/33455/0/0"
-    attest_sync_res = mbedClient.add_cloud_resource(33455, 0, 0,
-        "synchronous_attestation", M2MResourceInstance::OPAQUE,
-        M2MBase::GET_POST_ALLOWED, "", false, NULL, (void*)notification_status_callback);
-    attest_sync_res->set_execute_function(attest_sync_callback);
-    attest_sync_res->set_delayed_response(true);
+    // register the attested sensor reading resources (nonce and value)
+    attested_sensor_nonce_res = mbedClient.add_cloud_resource(33455, 0, 0,
+        "attested_sensor_reading_nonce", M2MResourceInstance::OPAQUE,
+        M2MBase::PUT_ALLOWED, "", false, (void*)attested_sensor_reading_callback, NULL);
+
+    attested_sensor_value_res = mbedClient.add_cloud_resource(33455, 0, 1,
+        "attested_sensor_reading_val", M2MResourceInstance::OPAQUE,
+        M2MBase::GET_ALLOWED, NULL, true, NULL, (void*)notification_status_callback);
 
 #endif
 
