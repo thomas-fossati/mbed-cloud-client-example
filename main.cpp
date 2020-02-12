@@ -34,9 +34,7 @@ int main(void) { return mcc_platform_run_program(main_application); }
 // Pointers to the resources that will be created in main_application().
 static M2MResource *attested_sensor_nonce_res;
 static M2MResource *attested_sensor_value_res;
-
-// Pointer to mbedClient, used for calling close function.
-static SimpleM2MClient *client;
+static M2MResource *exec_attested_sensor_res;
 
 void notification_status_callback(const M2MBase &object,
                                   const M2MBase::MessageDeliveryStatus status,
@@ -91,7 +89,7 @@ static bool set_resource(M2MResource *res, const uint8_t *token,
                          size_t token_sz) {
     print_buf("PSA token", token, token_sz);
 
-    uint8_t buf[640];
+    uint8_t buf[1024];
     size_t encoded_sz;
 
     int rc =
@@ -110,7 +108,7 @@ static bool set_resource(M2MResource *res, const uint8_t *token,
     return true;
 }
 
-void attest(const uint8_t *nonce, uint16_t nonce_sz) {
+void attest(M2MResource *res, const uint8_t *nonce, uint16_t nonce_sz) {
 #define MAX_ATTESTATION_TOKEN_SIZE (0x200)
     psa_attest_err_t rc = PSA_ATTEST_ERR_SUCCESS;
     uint8_t t[MAX_ATTESTATION_TOKEN_SIZE] = {};
@@ -142,7 +140,7 @@ void attest(const uint8_t *nonce, uint16_t nonce_sz) {
         return;
     }
 
-    (void)set_resource(attested_sensor_value_res, t, t_sz);
+    (void)set_resource(res, t, t_sz);
 }
 
 static bool extract_nonce(const uint8_t *b64, size_t b64_sz, uint8_t *nonce,
@@ -198,54 +196,115 @@ static void attested_sensor_reading_callback(void *) {
     // will it take to respond with the token.  Is that taken care of
     // automatically by the API?
 
-    attest(nonce, nonce_sz);
+    attest(attested_sensor_value_res, nonce, nonce_sz);
+}
+
+static bool extract_nonce_from_exec_params(const uint8_t *args,
+                                           uint16_t args_sz, uint8_t *nonce,
+                                           uint16_t *pnonce_sz) {
+    const char *nonce_key = "nonce=";
+    uint16_t nonce_sz;
+
+    print_buf("args", args, args_sz);
+
+    if (memcmp(args, (const void *)nonce_key, strlen(nonce_key)) != 0) {
+        printf("no nonce key\n");
+        return false;
+    }
+
+    if (args_sz < strlen(nonce_key)) {
+        printf("no nonce\n");
+        return false;
+    }
+
+    nonce_sz = args_sz - strlen(nonce_key);
+
+    switch (nonce_sz) {
+    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64:
+    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_48:
+    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32:
+        break;
+    default:
+        printf("bad nonce size (%zu)\n", nonce_sz);
+        return false;
+    }
+
+    if (nonce_sz < *pnonce_sz) {
+        printf("not enough space in the supplied buffer\n");
+        return false;
+    }
+
+    memcpy(nonce, args + strlen(nonce_key), nonce_sz);
+
+    return true;
+}
+
+static void exec_attested_res_callback(void *args) {
+    exec_attested_sensor_res->set_value(NULL, 0);
+
+    if (args) {
+        M2MResource::M2MExecuteParameter *params =
+            (M2MResource::M2MExecuteParameter *)args;
+
+        // use the largest possible nonce size (64 bytes)
+        uint8_t nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64];
+        uint16_t nonce_sz = sizeof nonce;
+
+        if (!extract_nonce_from_exec_params(params->get_argument_value(),
+                                            params->get_argument_value_length(),
+                                            nonce, &nonce_sz)) {
+            printf("Failed extracting nonce from Execute arguments\n");
+            // XXX(tho) it looks like returning here leaves the resource in
+            // confused state... Pelion needs to timeout before it can
+            // request again.  TODO(tho) how do we send an error?
+            return;
+        }
+
+        // TODO(tho) we should immediately ack because we don't know how long
+        // will it take to respond with the token.  Is that taken care of
+        // automatically by the API?
+
+        attest(exec_attested_sensor_res, nonce, nonce_sz);
+
+        exec_attested_sensor_res->send_delayed_post_response();
+    }
+}
+
+static bool do_init(void) {
+    if (application_init_mbed_trace() != 0) {
+        printf("Failed initializing mbed trace\n");
+        return false;
+    }
+
+    if (mcc_platform_storage_init() != 0) {
+        printf("Failed to initialize storage\n");
+        return false;
+    }
+
+    if (mcc_platform_init() != 0) {
+        printf("mcc_platform_init() failed!\n");
+        return false;
+    }
+
+    mcc_platform_sw_build_info();
+
+    if (mcc_platform_init_connection() == -1) {
+        printf("Failed to initialize connection\n");
+        return false;
+    }
+
+    printf("Network initialized.\n");
+
+    if (!application_init()) {
+        printf("Initialization failed, exiting application!\n");
+        return false;
+    }
+
+    return true;
 }
 
 void main_application(void) {
-#if defined(__linux__) && (MBED_CONF_MBED_TRACE_ENABLE == 0)
-    // make sure the line buffering is on as non-trace builds do
-    // not produce enough output to fill the buffer
-    setlinebuf(stdout);
-#endif
-
-    // Initialize trace-library first
-    if (application_init_mbed_trace() != 0) {
-        printf("Failed initializing mbed trace\n");
-        return;
-    }
-
-    // Initialize storage
-    if (mcc_platform_storage_init() != 0) {
-        printf("Failed to initialize storage\n");
-        return;
-    }
-
-    // Initialize platform-specific components
-    if (mcc_platform_init() != 0) {
-        printf("ERROR - platform_init() failed!\n");
-        return;
-    }
-
-    // Print platform information
-    mcc_platform_sw_build_info();
-
-    // Initialize network
-    if (!mcc_platform_init_connection()) {
-        printf("Network initialized, registering...\n");
-    } else {
-        return;
-    }
-
-    // SimpleClient is used for registering and unregistering resources to a
-    // server.
-    SimpleM2MClient mbedClient;
-
-    // application_init() runs the following initializations:
-    //  1. platform initialization
-    //  2. print memory statistics if MBED_HEAP_STATS_ENABLED is defined
-    //  3. FCC initialization.
-    if (!application_init()) {
-        printf("Initialization failed, exiting application!\n");
+    if (!do_init()) {
         return;
     }
 
@@ -257,10 +316,10 @@ void main_application(void) {
         return;
     }
 
-    // Save pointer to mbedClient so that other functions can access it.
-    client = &mbedClient;
+    // SimpleClient is used for registering and unregistering resources to a
+    // server.
+    SimpleM2MClient mbedClient;
 
-    // register the attested sensor reading resources (nonce and value)
     attested_sensor_nonce_res = mbedClient.add_cloud_resource(
         33455, 0, 0, "attested_sensor_reading_nonce",
         M2MResourceInstance::OPAQUE, M2MBase::PUT_ALLOWED, "", false,
@@ -270,6 +329,14 @@ void main_application(void) {
         33455, 0, 1, "attested_sensor_reading_val", M2MResourceInstance::OPAQUE,
         M2MBase::GET_ALLOWED, NULL, true, NULL,
         (void *)notification_status_callback);
+
+    exec_attested_sensor_res = mbedClient.add_cloud_resource(
+        33455, 0, 2, "exec_attested_sensor", M2MResourceInstance::OPAQUE,
+        M2MBase::GET_POST_ALLOWED, NULL, true,
+        (void *)exec_attested_res_callback,
+        (void *)notification_status_callback);
+
+    exec_attested_sensor_res->set_delayed_response(true);
 
     mbedClient.register_and_connect();
 
