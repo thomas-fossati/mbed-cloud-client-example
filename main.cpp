@@ -36,9 +36,10 @@ static M2MResource *attested_sensor_nonce_res;
 static M2MResource *attested_sensor_value_res;
 static M2MResource *exec_attested_sensor_res;
 
-void notification_status_callback(const M2MBase &object,
-                                  const M2MBase::MessageDeliveryStatus status,
-                                  const M2MBase::MessageType /*type*/) {
+static void
+notification_status_callback(const M2MBase &object,
+                             const M2MBase::MessageDeliveryStatus status,
+                             const M2MBase::MessageType /*type*/) {
     switch (status) {
     case M2MBase::MESSAGE_STATUS_BUILD_ERROR:
         printf(
@@ -78,7 +79,7 @@ void notification_status_callback(const M2MBase &object,
     }
 }
 
-void print_buf(const char *label, const uint8_t *buf, uint32_t buf_sz) {
+static void print_buf(const char *label, const uint8_t *buf, uint32_t buf_sz) {
     printf("%s (@%p) (%lu bytes):\n", label, buf, buf_sz);
     for (uint32_t i = 0; i < buf_sz; i++)
         printf("%02x", buf[i]);
@@ -108,16 +109,46 @@ static bool set_resource(M2MResource *res, const uint8_t *token,
     return true;
 }
 
-void attest(M2MResource *res, const uint8_t *nonce, uint16_t nonce_sz) {
+static bool M(unsigned int s, const uint8_t *T, size_t T_sz,
+              uint8_t out[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32]) {
+    char sbuf[64] = {0};
+    mbedtls_sha256_context c;
+
+    if (snprintf(sbuf, sizeof sbuf, "%u", s) < 0) {
+        return false;
+    }
+
+    mbedtls_sha256_init(&c);
+
+    if (mbedtls_sha256_starts_ret(&c, 0) || // bizarrely, 0 means SHA-256
+        mbedtls_sha256_update_ret(&c, (const uint8_t *)sbuf, strlen(sbuf)) ||
+        mbedtls_sha256_update_ret(&c, T, T_sz) ||
+        mbedtls_sha256_finish_ret(&c, out)) {
+        return false;
+    }
+
+    return true;
+}
+
+static void attest(M2MResource *res, const uint8_t *challenge,
+                   uint16_t challenge_sz) {
 #define MAX_ATTESTATION_TOKEN_SIZE (0x200)
     psa_attest_err_t rc = PSA_ATTEST_ERR_SUCCESS;
     uint8_t t[MAX_ATTESTATION_TOKEN_SIZE] = {};
     uint32_t t_sz;
 
     printf("computing attestation resource\n");
-    print_buf("nonce", nonce, nonce_sz);
+    print_buf("challenge", challenge, challenge_sz);
 
-    rc = psa_initial_attest_get_token_size(nonce_sz, &t_sz);
+    static unsigned int s = 0;
+    uint8_t nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32];
+
+    if (!M(s++, challenge, challenge_sz, nonce)) {
+        printf("computing M() failed\n");
+        return;
+    }
+
+    rc = psa_initial_attest_get_token_size(sizeof nonce, &t_sz);
     if (rc != PSA_ATTEST_ERR_SUCCESS) {
         printf("Getting initial attestation token size failed with status %d\n",
                rc);
@@ -134,11 +165,13 @@ void attest(M2MResource *res, const uint8_t *nonce, uint16_t nonce_sz) {
     // bytes worth.
     // So, it looks like calling psa_initial_attest_get_token_size() is
     // necessary after all?
-    rc = psa_initial_attest_get_token(nonce, nonce_sz, t, &t_sz);
+    rc = psa_initial_attest_get_token(nonce, sizeof nonce, t, &t_sz);
     if (rc != PSA_ATTEST_ERR_SUCCESS) {
         printf("PSA attestation failed with status %d\n", rc);
         return;
     }
+
+    // TODO(tho) compute aggregate resource {s, T}
 
     (void)set_resource(res, t, t_sz);
 }
@@ -254,15 +287,8 @@ static void exec_attested_res_callback(void *args) {
                                             params->get_argument_value_length(),
                                             nonce, &nonce_sz)) {
             printf("Failed extracting nonce from Execute arguments\n");
-            // XXX(tho) it looks like returning here leaves the resource in
-            // confused state... Pelion needs to timeout before it can
-            // request again.  TODO(tho) how do we send an error?
             return;
         }
-
-        // TODO(tho) we should immediately ack because we don't know how long
-        // will it take to respond with the token.  Is that taken care of
-        // automatically by the API?
 
         attest(exec_attested_sensor_res, nonce, nonce_sz);
 
@@ -296,21 +322,22 @@ static bool do_init(void) {
     printf("Network initialized.\n");
 
     if (!application_init()) {
-        printf("Initialization failed, exiting application!\n");
+        printf("application_init() failed!\n");
         return false;
     }
 
     return true;
 }
 
-void main_application(void) {
+static void main_application(void) {
     if (!do_init()) {
+        printf("Initalization failed, exiting application!\n");
         return;
     }
 
     psa_status_t rc = psa_crypto_init();
     if (rc != PSA_SUCCESS) {
-        printf("PSA crypto initialisation failed with status %ld, exiting "
+        printf("PSA crypto initialization failed with status %ld, exiting "
                "application!\n",
                rc);
         return;
