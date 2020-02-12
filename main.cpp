@@ -16,140 +16,101 @@
 // limitations under the License.
 // ----------------------------------------------------------------------------
 
-#include "psa/error.h"
 #include "psa/crypto.h"
+#include "psa/error.h"
 #include "psa_initial_attestation_api.h"
 #include "simplem2mclient.h"
+#include <mbedtls/base64.h>
 #ifdef TARGET_LIKE_MBED
 #include "mbed.h"
 #endif
 #include "application_init.h"
 #include "mcc_common_button_and_led.h"
-#include "blinky.h"
-#ifndef MBED_CONF_MBED_CLOUD_CLIENT_DISABLE_CERTIFICATE_ENROLLMENT
-#include "certificate_enrollment_user_cb.h"
-#endif
-
-#if defined(MBED_CONF_NANOSTACK_HAL_EVENT_LOOP_USE_MBED_EVENTS) && \
- (MBED_CONF_NANOSTACK_HAL_EVENT_LOOP_USE_MBED_EVENTS == 1) && \
- defined(MBED_CONF_EVENTS_SHARED_DISPATCH_FROM_APPLICATION) && \
- (MBED_CONF_EVENTS_SHARED_DISPATCH_FROM_APPLICATION == 1)
-#include "nanostack-event-loop/eventOS_scheduler.h"
-#endif
-
-// event based LED blinker, controlled via pattern_resource
-#ifndef MCC_MINIMAL
-static Blinky blinky;
-#endif
 
 static void main_application(void);
 
-#if defined(MBED_CLOUD_APPLICATION_NONSTANDARD_ENTRYPOINT)
-extern "C"
-int mbed_cloud_application_entrypoint(void)
-#else
-int main(void)
-#endif
-{
-    return mcc_platform_run_program(main_application);
-}
+int main(void) { return mcc_platform_run_program(main_application); }
 
 // Pointers to the resources that will be created in main_application().
-static M2MResource* button_res;
-static M2MResource* pattern_res;
-static M2MResource* blink_res;
-static M2MResource* attested_sensor_nonce_res;
-static M2MResource* attested_sensor_value_res;
+static M2MResource *attested_sensor_nonce_res;
+static M2MResource *attested_sensor_value_res;
 
 // Pointer to mbedClient, used for calling close function.
 static SimpleM2MClient *client;
 
-void pattern_updated(const char *)
-{
-    printf("PUT received, new value: %s\n", pattern_res->get_value_string().c_str());
-}
-
-void blink_callback(void *)
-{
-    String pattern_string = pattern_res->get_value_string();
-    const char *pattern = pattern_string.c_str();
-    printf("LED pattern = %s\n", pattern);
-
-    // The pattern is something like 500:200:500, so parse that.
-    // LED blinking is done while parsing.
-#ifndef MCC_MINIMAL
-    const bool restart_pattern = false;
-    if (blinky.start((char*)pattern_res->value(), pattern_res->value_length(), restart_pattern) == false) {
-        printf("out of memory error\n");
-    }
-#endif
-    blink_res->send_delayed_post_response();
-}
-
-void notification_status_callback(const M2MBase& object,
-                            const M2MBase::MessageDeliveryStatus status,
-                            const M2MBase::MessageType /*type*/)
-{
-    switch(status) {
-        case M2MBase::MESSAGE_STATUS_BUILD_ERROR:
-            printf("Message status callback: (%s) error when building CoAP message\n", object.uri_path());
-            break;
-        case M2MBase::MESSAGE_STATUS_RESEND_QUEUE_FULL:
-            printf("Message status callback: (%s) CoAP resend queue full\n", object.uri_path());
-            break;
-        case M2MBase::MESSAGE_STATUS_SENT:
-            printf("Message status callback: (%s) Message sent to server\n", object.uri_path());
-            break;
-        case M2MBase::MESSAGE_STATUS_DELIVERED:
-            printf("Message status callback: (%s) Message delivered\n", object.uri_path());
-            break;
-        case M2MBase::MESSAGE_STATUS_SEND_FAILED:
-            printf("Message status callback: (%s) Message sending failed\n", object.uri_path());
-            break;
-        case M2MBase::MESSAGE_STATUS_SUBSCRIBED:
-            printf("Message status callback: (%s) subscribed\n", object.uri_path());
-            break;
-        case M2MBase::MESSAGE_STATUS_UNSUBSCRIBED:
-            printf("Message status callback: (%s) subscription removed\n", object.uri_path());
-            break;
-        case M2MBase::MESSAGE_STATUS_REJECTED:
-            printf("Message status callback: (%s) server has rejected the message\n", object.uri_path());
-            break;
-        default:
-            break;
+void notification_status_callback(const M2MBase &object,
+                                  const M2MBase::MessageDeliveryStatus status,
+                                  const M2MBase::MessageType /*type*/) {
+    switch (status) {
+    case M2MBase::MESSAGE_STATUS_BUILD_ERROR:
+        printf(
+            "Message status callback: (%s) error when building CoAP message\n",
+            object.uri_path());
+        break;
+    case M2MBase::MESSAGE_STATUS_RESEND_QUEUE_FULL:
+        printf("Message status callback: (%s) CoAP resend queue full\n",
+               object.uri_path());
+        break;
+    case M2MBase::MESSAGE_STATUS_SENT:
+        printf("Message status callback: (%s) Message sent to server\n",
+               object.uri_path());
+        break;
+    case M2MBase::MESSAGE_STATUS_DELIVERED:
+        printf("Message status callback: (%s) Message delivered\n",
+               object.uri_path());
+        break;
+    case M2MBase::MESSAGE_STATUS_SEND_FAILED:
+        printf("Message status callback: (%s) Message sending failed\n",
+               object.uri_path());
+        break;
+    case M2MBase::MESSAGE_STATUS_SUBSCRIBED:
+        printf("Message status callback: (%s) subscribed\n", object.uri_path());
+        break;
+    case M2MBase::MESSAGE_STATUS_UNSUBSCRIBED:
+        printf("Message status callback: (%s) subscription removed\n",
+               object.uri_path());
+        break;
+    case M2MBase::MESSAGE_STATUS_REJECTED:
+        printf(
+            "Message status callback: (%s) server has rejected the message\n",
+            object.uri_path());
+        break;
+    default:
+        break;
     }
 }
 
-// This function is called when a POST request is received for resource 5000/0/1.
-void unregister(void *)
-{
-    printf("Unregister resource executed\n");
-    client->close();
-}
-
-// This function is called when a POST request is received for resource 5000/0/2.
-void factory_reset(void *)
-{
-    printf("Factory reset resource executed\n");
-    client->close();
-    kcm_status_e kcm_status = kcm_factory_reset();
-    if (kcm_status != KCM_STATUS_SUCCESS) {
-        printf("Failed to do factory reset - %d\n", kcm_status);
-    } else {
-        printf("Factory reset completed. Now restart the device\n");
-    }
-}
-
-void print_buf(const char *label, const uint8_t *buf, uint32_t buf_sz)
-{
+void print_buf(const char *label, const uint8_t *buf, uint32_t buf_sz) {
     printf("%s (@%p) (%lu bytes):\n", label, buf, buf_sz);
     for (uint32_t i = 0; i < buf_sz; i++)
         printf("%02x", buf[i]);
     printf("\n");
 }
 
-void attest(const uint8_t *nonce, uint16_t nonce_sz)
-{
+static bool set_resource(M2MResource *res, const uint8_t *token,
+                         size_t token_sz) {
+    print_buf("PSA token", token, token_sz);
+
+    uint8_t buf[640];
+    size_t encoded_sz;
+
+    int rc =
+        mbedtls_base64_encode(buf, sizeof buf, &encoded_sz, token, token_sz);
+
+    switch (rc) {
+    case MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL:
+        printf("destination buffer too small\n");
+        return false;
+    default:
+        break;
+    }
+
+    res->set_value(buf, encoded_sz);
+
+    return true;
+}
+
+void attest(const uint8_t *nonce, uint16_t nonce_sz) {
 #define MAX_ATTESTATION_TOKEN_SIZE (0x200)
     psa_attest_err_t rc = PSA_ATTEST_ERR_SUCCESS;
     uint8_t t[MAX_ATTESTATION_TOKEN_SIZE] = {};
@@ -160,7 +121,8 @@ void attest(const uint8_t *nonce, uint16_t nonce_sz)
 
     rc = psa_initial_attest_get_token_size(nonce_sz, &t_sz);
     if (rc != PSA_ATTEST_ERR_SUCCESS) {
-        printf("Getting initial attestation token size failed with status %d\n", rc);
+        printf("Getting initial attestation token size failed with status %d\n",
+               rc);
         return;
     }
 
@@ -174,58 +136,38 @@ void attest(const uint8_t *nonce, uint16_t nonce_sz)
     // bytes worth.
     // So, it looks like calling psa_initial_attest_get_token_size() is
     // necessary after all?
-    rc  = psa_initial_attest_get_token(nonce, nonce_sz, t, &t_sz);
+    rc = psa_initial_attest_get_token(nonce, nonce_sz, t, &t_sz);
     if (rc != PSA_ATTEST_ERR_SUCCESS) {
         printf("PSA attestation failed with status %d\n", rc);
         return;
     }
 
-    print_buf("PSA token", t, t_sz);
-
-    attested_sensor_value_res->set_value(t, t_sz);
+    (void)set_resource(attested_sensor_value_res, t, t_sz);
 }
 
-// assume args is hex-encoded
-static bool extract_nonce_from_args(const uint8_t *args, size_t args_sz, uint8_t *nonce, size_t *pnonce_sz)
-{
-    print_buf("args", args, args_sz);
+static bool extract_nonce(const uint8_t *b64, size_t b64_sz, uint8_t *nonce,
+                          size_t *pnonce_sz) {
+    size_t nonce_sz;
 
-    if (args_sz == 0) {
-        printf("no nonce\n");
+    printf("base64 nonce: %s\n", b64);
+
+    switch (mbedtls_base64_decode(nonce, *pnonce_sz, &nonce_sz, b64, b64_sz)) {
+    case MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL:
+        printf("nonce buffer too small\n");
+        return false;
+    case MBEDTLS_ERR_BASE64_INVALID_CHARACTER:
+        printf("invalid base64\n");
         return false;
     }
-
-    if (args_sz % 2) {
-        printf("nonce should be an even number of chars\n");
-        return false;
-    }
-
-    size_t nonce_sz = args_sz / 2;
 
     switch (nonce_sz) {
-        case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64:
-        case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_48:
-        case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32:
-            break;
-        default:
-            printf("bad nonce size (%zu)\n", nonce_sz);
-            return false;
-    }
-
-    if (nonce_sz > *pnonce_sz) {
-        printf("not enough space in the supplied buffer (%zu v %zu)\n", nonce_sz, *pnonce_sz);
+    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64:
+    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_48:
+    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32:
+        break;
+    default:
+        printf("bad nonce size (%zu)\n", nonce_sz);
         return false;
-    }
-
-    const char *pos = (const char *)args; // XXX(tho)
-    size_t count = 0;
-
-    for (; count < nonce_sz; count++) {
-        if (sscanf(pos, "%2hhx", &nonce[count]) != 1) {
-            printf("bad hex value at position %zu\n", count);
-            return false;
-        }
-        pos += 2;
     }
 
     *pnonce_sz = nonce_sz;
@@ -233,19 +175,18 @@ static bool extract_nonce_from_args(const uint8_t *args, size_t args_sz, uint8_t
     return true;
 }
 
-static void attested_sensor_reading_callback(void *)
-{
+static void attested_sensor_reading_callback(void *) {
     // clear previous result as soon as we receive a new request
     attested_sensor_value_res->set_value(NULL, 0);
 
-    const uint8_t *nonce_hex = attested_sensor_nonce_res->value();
-    const size_t nonce_hex_sz = attested_sensor_nonce_res->value_length();
+    const uint8_t *nonce_b64 = attested_sensor_nonce_res->value();
+    const size_t nonce_b64_sz = attested_sensor_nonce_res->value_length();
 
     // use the largest possible nonce size (64 bytes)
     uint8_t nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64];
     size_t nonce_sz = sizeof nonce;
 
-    if (!extract_nonce_from_args(nonce_hex, nonce_hex_sz, nonce, &nonce_sz)) {
+    if (!extract_nonce(nonce_b64, nonce_b64_sz, nonce, &nonce_sz)) {
         printf("Failed extracting nonce from PUT request\n");
         // XXX(tho) it looks like returning here leaves the resource in
         // confused state... Pelion needs to timeout before it can
@@ -260,28 +201,27 @@ static void attested_sensor_reading_callback(void *)
     attest(nonce, nonce_sz);
 }
 
-void main_application(void)
-{
+void main_application(void) {
 #if defined(__linux__) && (MBED_CONF_MBED_TRACE_ENABLE == 0)
-        // make sure the line buffering is on as non-trace builds do
-        // not produce enough output to fill the buffer
-        setlinebuf(stdout);
+    // make sure the line buffering is on as non-trace builds do
+    // not produce enough output to fill the buffer
+    setlinebuf(stdout);
 #endif
 
     // Initialize trace-library first
     if (application_init_mbed_trace() != 0) {
-        printf("Failed initializing mbed trace\n" );
+        printf("Failed initializing mbed trace\n");
         return;
     }
 
     // Initialize storage
     if (mcc_platform_storage_init() != 0) {
-        printf("Failed to initialize storage\n" );
+        printf("Failed to initialize storage\n");
         return;
     }
 
     // Initialize platform-specific components
-    if(mcc_platform_init() != 0) {
+    if (mcc_platform_init() != 0) {
         printf("ERROR - platform_init() failed!\n");
         return;
     }
@@ -296,15 +236,8 @@ void main_application(void)
         return;
     }
 
-    // Print some statistics of the object sizes and their heap memory consumption.
-    // NOTE: This *must* be done before creating MbedCloudClient, as the statistic calculation
-    // creates and deletes M2MSecurity and M2MDevice singleton objects, which are also used by
-    // the MbedCloudClient.
-#ifdef MBED_HEAP_STATS_ENABLED
-    print_m2mobject_stats();
-#endif
-
-    // SimpleClient is used for registering and unregistering resources to a server.
+    // SimpleClient is used for registering and unregistering resources to a
+    // server.
     SimpleM2MClient mbedClient;
 
     // application_init() runs the following initializations:
@@ -318,80 +251,27 @@ void main_application(void)
 
     psa_status_t rc = psa_crypto_init();
     if (rc != PSA_SUCCESS) {
-        printf("PSA crypto initialisation failed with status %ld, exiting application!\n", rc);
+        printf("PSA crypto initialisation failed with status %ld, exiting "
+               "application!\n",
+               rc);
         return;
     }
 
     // Save pointer to mbedClient so that other functions can access it.
     client = &mbedClient;
 
-#ifdef MBED_HEAP_STATS_ENABLED
-    printf("Client initialized\r\n");
-    print_heap_stats();
-#endif
-#ifdef MBED_STACK_STATS_ENABLED
-    print_stack_statistics();
-#endif
-
-#ifndef MCC_MEMORY
-    // Create resource for button count. Path of this resource will be: 3200/0/5501.
-    button_res = mbedClient.add_cloud_resource(3200, 0, 5501, "button_resource", M2MResourceInstance::INTEGER,
-                              M2MBase::GET_ALLOWED, 0, true, NULL, (void*)notification_status_callback);
-    button_res->set_value(0);
-
-    // Create resource for led blinking pattern. Path of this resource will be: 3201/0/5853.
-    pattern_res = mbedClient.add_cloud_resource(3201, 0, 5853, "pattern_resource", M2MResourceInstance::STRING,
-                               M2MBase::GET_PUT_ALLOWED, "500:500:500:500", true, (void*)pattern_updated, (void*)notification_status_callback);
-
-    // Create resource for starting the led blinking. Path of this resource will be: 3201/0/5850.
-    blink_res = mbedClient.add_cloud_resource(3201, 0, 5850, "blink_resource", M2MResourceInstance::STRING,
-                             M2MBase::POST_ALLOWED, "", false, (void*)blink_callback, (void*)notification_status_callback);
-    // Use delayed response
-    blink_res->set_delayed_response(true);
-
-    // Create resource for unregistering the device. Path of this resource will be: 5000/0/1.
-    mbedClient.add_cloud_resource(5000, 0, 1, "unregister", M2MResourceInstance::STRING,
-                 M2MBase::POST_ALLOWED, NULL, false, (void*)unregister, NULL);
-
-    // Create resource for running factory reset for the device. Path of this resource will be: 5000/0/2.
-    mbedClient.add_cloud_resource(5000, 0, 2, "factory_reset", M2MResourceInstance::STRING,
-                 M2MBase::GET_POST_ALLOWED, NULL, false, (void*)factory_reset, NULL);
-
     // register the attested sensor reading resources (nonce and value)
-    attested_sensor_nonce_res = mbedClient.add_cloud_resource(33455, 0, 0,
-        "attested_sensor_reading_nonce", M2MResourceInstance::OPAQUE,
-        M2MBase::PUT_ALLOWED, "", false, (void*)attested_sensor_reading_callback, NULL);
+    attested_sensor_nonce_res = mbedClient.add_cloud_resource(
+        33455, 0, 0, "attested_sensor_reading_nonce",
+        M2MResourceInstance::OPAQUE, M2MBase::PUT_ALLOWED, "", false,
+        (void *)attested_sensor_reading_callback, NULL);
 
-    attested_sensor_value_res = mbedClient.add_cloud_resource(33455, 0, 1,
-        "attested_sensor_reading_val", M2MResourceInstance::OPAQUE,
-        M2MBase::GET_ALLOWED, NULL, true, NULL, (void*)notification_status_callback);
-
-#endif
+    attested_sensor_value_res = mbedClient.add_cloud_resource(
+        33455, 0, 1, "attested_sensor_reading_val", M2MResourceInstance::OPAQUE,
+        M2MBase::GET_ALLOWED, NULL, true, NULL,
+        (void *)notification_status_callback);
 
     mbedClient.register_and_connect();
-
-#ifndef MCC_MINIMAL
-    blinky.init(mbedClient, button_res);
-    blinky.request_next_loop_event();
-#endif
-
-
-#ifndef MBED_CONF_MBED_CLOUD_CLIENT_DISABLE_CERTIFICATE_ENROLLMENT
-    // Add certificate renewal callback
-    mbedClient.get_cloud_client().on_certificate_renewal(certificate_renewal_cb);
-#endif // MBED_CONF_MBED_CLOUD_CLIENT_DISABLE_CERTIFICATE_ENROLLMENT
-
-#if defined(MBED_CONF_NANOSTACK_HAL_EVENT_LOOP_USE_MBED_EVENTS) && \
- (MBED_CONF_NANOSTACK_HAL_EVENT_LOOP_USE_MBED_EVENTS == 1) && \
- defined(MBED_CONF_EVENTS_SHARED_DISPATCH_FROM_APPLICATION) && \
- (MBED_CONF_EVENTS_SHARED_DISPATCH_FROM_APPLICATION == 1)
-    printf("Starting mbed eventloop...\n");
-
-    eventOS_scheduler_mutex_wait();
-
-    EventQueue *queue = mbed::mbed_event_queue();
-    queue->dispatch_forever();
-#else
 
     // Check if client is registering or registered, if true sleep and repeat.
     while (mbedClient.is_register_called()) {
@@ -400,5 +280,4 @@ void main_application(void)
 
     // Client unregistered, disconnect and exit program.
     mcc_platform_close_connection();
-#endif
 }
