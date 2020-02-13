@@ -1,5 +1,5 @@
 // ----------------------------------------------------------------------------
-// Copyright 2016-2019 ARM Ltd.
+// Copyright 2016-2020 ARM Ltd.
 //
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -16,16 +16,14 @@
 // limitations under the License.
 // ----------------------------------------------------------------------------
 
+#include "application_init.h"
+#include "mbed.h"
+#include "mcc_common_button_and_led.h"
 #include "psa/crypto.h"
 #include "psa/error.h"
 #include "psa_initial_attestation_api.h"
 #include "simplem2mclient.h"
 #include <mbedtls/base64.h>
-#ifdef TARGET_LIKE_MBED
-#include "mbed.h"
-#endif
-#include "application_init.h"
-#include "mcc_common_button_and_led.h"
 
 extern "C" {
 #include "mbed-os/components/TARGET_PSA/services/attestation/qcbor/inc/UsefulBuf.h"
@@ -115,8 +113,8 @@ static bool set_resource(M2MResource *res, const uint8_t *token,
     return true;
 }
 
-static bool M(unsigned int s, const uint8_t *T, size_t T_sz,
-              uint8_t out[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32]) {
+static bool mix(unsigned int s, const uint8_t *T, size_t T_sz,
+                uint8_t out[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32]) {
     char sbuf[64] = {0};
     mbedtls_sha256_context c;
 
@@ -136,11 +134,11 @@ static bool M(unsigned int s, const uint8_t *T, size_t T_sz,
     return true;
 }
 
+// CBOR-encode the attested-reading resource:
 // attested-reading = {
 //    s : uint,
 //    T : bstr
 // }
-// encoded as a CBOR array
 static bool cbor_it(unsigned int s, const uint8_t *token, size_t token_sz,
                     UsefulBufC *pcbor) {
     QCBOREncodeContext cbor_ctx;
@@ -160,42 +158,37 @@ static bool cbor_it(unsigned int s, const uint8_t *token, size_t token_sz,
     return true;
 }
 
-static void attest(M2MResource *res, const uint8_t *challenge,
-                   uint16_t challenge_sz) {
-#define MAX_ATTESTATION_TOKEN_SIZE (0x200)
+static void attested_sensor_reading(M2MResource *res, const uint8_t *ch,
+                                    uint16_t ch_sz) {
     psa_attest_err_t rc = PSA_ATTEST_ERR_SUCCESS;
-    uint8_t t[MAX_ATTESTATION_TOKEN_SIZE] = {};
-    uint32_t t_sz;
-
-    printf("computing attestation resource\n");
-    print_buf("challenge", challenge, challenge_sz);
-
+    uint8_t T[512], nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32];
+    uint32_t T_sz;
     static unsigned int s;
-    uint8_t nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32];
 
-    if (!M(s++, challenge, challenge_sz, nonce)) {
-        printf("computing M() failed\n");
+    printf("computing attested sensor reading\n");
+    printf("ch_sz=%zu\n", ch_sz);
+    print_buf("ch", ch, ch_sz);
+
+    if (!mix(s++, ch, ch_sz, nonce)) {
+        printf("computing mix() failed\n");
         return;
     }
 
-    rc = psa_initial_attest_get_token_size(sizeof nonce, &t_sz);
+    print_buf("computed nonce=mix(s, ch)", nonce, sizeof nonce);
+
+    rc = psa_initial_attest_get_token_size(sizeof nonce, &T_sz);
     if (rc != PSA_ATTEST_ERR_SUCCESS) {
         printf("Getting initial attestation token size failed with status %d\n",
                rc);
         return;
     }
 
-    // XXX(tho) -- not sure about the semantics of the "token_size" argument to
-    // psa_initial_attest_get_token(..., uint32_t *token_size).  I'd have
-    // expected this to be a value-result argument that the caller uses to tell
-    // the callee the size of memory allocated to the token buffer, and (on
-    // success) the callee fills with the actual length of the produced token.
-    // This doesn't seem to be the case though: in fact, if I pass: t_sz = 512;
-    // the returned value is unchanged, while the token is effectively 438
-    // bytes worth.
-    // So, it looks like calling psa_initial_attest_get_token_size() is
-    // necessary after all?
-    rc = psa_initial_attest_get_token(nonce, sizeof nonce, t, &t_sz);
+    if (T_sz > sizeof T) {
+        printf("token would exceed allocated memory\n");
+        return;
+    }
+
+    rc = psa_initial_attest_get_token(nonce, sizeof nonce, T, &T_sz);
     if (rc != PSA_ATTEST_ERR_SUCCESS) {
         printf("PSA attestation failed with status %d\n", rc);
         return;
@@ -203,8 +196,9 @@ static void attest(M2MResource *res, const uint8_t *challenge,
 
     UsefulBufC cbor;
 
-    // Compute aggregate resource {s, T}
-    if (!cbor_it(s, t, t_sz, &cbor)) {
+    // Encode aggregate resource
+    // attested-reading = { s : uint, T : bstr }
+    if (!cbor_it(s, T, T_sz, &cbor)) {
         printf("CBOR encoding\n");
         return;
     }
@@ -212,13 +206,14 @@ static void attest(M2MResource *res, const uint8_t *challenge,
     (void)set_resource(res, (const uint8_t *)cbor.ptr, cbor.len);
 }
 
-static bool extract_nonce(const uint8_t *b64, size_t b64_sz, uint8_t *nonce,
-                          size_t *pnonce_sz) {
-    size_t nonce_sz;
+// Extract base64 encoded challenge into the supplied binary buffer
+static bool extract_ch(const uint8_t *b64, size_t b64_sz, uint8_t *bin,
+                       size_t *pbin_sz) {
+    size_t bin_sz;
 
-    printf("base64 nonce: %s\n", b64);
+    printf("base64 ch: %s\n", b64);
 
-    switch (mbedtls_base64_decode(nonce, *pnonce_sz, &nonce_sz, b64, b64_sz)) {
+    switch (mbedtls_base64_decode(bin, *pbin_sz, &bin_sz, b64, b64_sz)) {
     case MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL:
         printf("nonce buffer too small\n");
         return false;
@@ -227,81 +222,51 @@ static bool extract_nonce(const uint8_t *b64, size_t b64_sz, uint8_t *nonce,
         return false;
     }
 
-    switch (nonce_sz) {
-    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64:
-    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_48:
-    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32:
-        break;
-    default:
-        printf("bad nonce size (%zu)\n", nonce_sz);
-        return false;
-    }
-
-    *pnonce_sz = nonce_sz;
+    *pbin_sz = bin_sz;
 
     return true;
 }
 
 static void attested_sensor_reading_callback(void *) {
     // use the largest possible nonce size (64 bytes)
-    uint8_t nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64];
+    uint8_t nonce[64];
     size_t nonce_sz = sizeof nonce;
 
     // clear previous result as soon as we receive a new request
     attested_sensor_value_res->set_value(NULL, 0);
 
-    if (!extract_nonce(attested_sensor_nonce_res->value(),
-                       attested_sensor_nonce_res->value_length(), nonce,
-                       &nonce_sz)) {
+    if (!extract_ch(attested_sensor_nonce_res->value(),
+                    attested_sensor_nonce_res->value_length(), nonce,
+                    &nonce_sz)) {
         printf("Failed extracting nonce from PUT request\n");
         return;
     }
 
-    // TODO(tho) we should immediately ack because we don't know how long
-    // will it take to respond with the token.  Is that taken care of
-    // automatically by the API?
-
-    attest(attested_sensor_value_res, nonce, nonce_sz);
+    attested_sensor_reading(attested_sensor_value_res, nonce, nonce_sz);
 }
 
-static bool extract_nonce_from_exec_params(const uint8_t *args,
-                                           uint16_t args_sz, uint8_t *nonce,
-                                           uint16_t *pnonce_sz) {
-    const char *nonce_key = "nonce=";
-    uint16_t nonce_sz;
+// Extract base64 encoded challenge from Execute parameters
+// Expects "ch=<base64 value>"
+static bool extract_ch_from_exec_params(const uint8_t *args, uint16_t args_sz,
+                                        uint8_t *bin, size_t *pbin_sz) {
+    const char *ch_key = "ch=";
 
     print_buf("args", args, args_sz);
 
-    if (memcmp(args, (const void *)nonce_key, strlen(nonce_key)) != 0) {
-        printf("no nonce key\n");
+    if (memcmp(args, (const void *)ch_key, strlen(ch_key)) != 0) {
+        printf("no ch key\n");
         return false;
     }
 
-    if (args_sz < strlen(nonce_key)) {
-        printf("no nonce\n");
+    if (args_sz <= strlen(ch_key)) {
+        printf("no ch value\n");
         return false;
     }
 
-    nonce_sz = args_sz - strlen(nonce_key);
+    const uint8_t *ch = args + strlen(ch_key);
+    uint16_t ch_sz = args_sz - strlen(ch_key);
 
-    switch (nonce_sz) {
-    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64:
-    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_48:
-    case PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32:
-        break;
-    default:
-        printf("bad nonce size (%zu)\n", nonce_sz);
-        return false;
-    }
-
-    if (nonce_sz < *pnonce_sz) {
-        printf("not enough space in the supplied buffer\n");
-        return false;
-    }
-
-    memcpy(nonce, args + strlen(nonce_key), nonce_sz);
-
-    return true;
+    return extract_ch(ch, ch_sz, bin, pbin_sz);
 }
 
 static void exec_attested_res_callback(void *args) {
@@ -313,16 +278,16 @@ static void exec_attested_res_callback(void *args) {
 
         // use the largest possible nonce size (64 bytes)
         uint8_t nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64];
-        uint16_t nonce_sz = sizeof nonce;
+        size_t nonce_sz = sizeof nonce;
 
-        if (!extract_nonce_from_exec_params(params->get_argument_value(),
-                                            params->get_argument_value_length(),
-                                            nonce, &nonce_sz)) {
+        if (!extract_ch_from_exec_params(params->get_argument_value(),
+                                         params->get_argument_value_length(),
+                                         nonce, &nonce_sz)) {
             printf("Failed extracting nonce from Execute arguments\n");
             return;
         }
 
-        attest(exec_attested_sensor_res, nonce, nonce_sz);
+        attested_sensor_reading(exec_attested_sensor_res, nonce, nonce_sz);
 
         exec_attested_sensor_res->send_delayed_post_response();
     }
@@ -362,6 +327,11 @@ static bool do_init(void) {
 }
 
 static void do_register_resources(SimpleM2MClient &mbed_client) {
+    // asynchronous:
+    //  /33455/0/0 -> nonce
+    //  /33455/0/1 -> value
+    // synchronous:
+    //  /33455/0/2
     attested_sensor_nonce_res = mbed_client.add_cloud_resource(
         33455, 0, 0, "attested_sensor_reading_nonce",
         M2MResourceInstance::OPAQUE, M2MBase::PUT_ALLOWED, "", false,
