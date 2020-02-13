@@ -27,6 +27,12 @@
 #include "application_init.h"
 #include "mcc_common_button_and_led.h"
 
+extern "C" {
+#include "mbed-os/components/TARGET_PSA/services/attestation/qcbor/inc/UsefulBuf.h"
+#include "mbed-os/components/TARGET_PSA/services/attestation/qcbor/inc/qcbor.h"
+#include "mbed-os/components/TARGET_PSA/services/attestation/qcbor/inc/useful_buf.h"
+}
+
 static void main_application(void);
 
 int main(void) { return mcc_platform_run_program(main_application); }
@@ -130,6 +136,30 @@ static bool M(unsigned int s, const uint8_t *T, size_t T_sz,
     return true;
 }
 
+// attested-reading = {
+//    s : uint,
+//    T : bstr
+// }
+// encoded as a CBOR array
+static bool cbor_it(unsigned int s, const uint8_t *token, size_t token_sz,
+                    UsefulBufC *pcbor) {
+    QCBOREncodeContext cbor_ctx;
+    static uint8_t buf[1024];
+
+    QCBOREncode_Init(&cbor_ctx, UsefulBuf_FROM_BYTE_ARRAY(buf));
+    QCBOREncode_OpenArray(&cbor_ctx);
+    QCBOREncode_AddUInt64(&cbor_ctx, s);
+    QCBOREncode_AddBytes(&cbor_ctx, ((UsefulBufC){token, token_sz}));
+    QCBOREncode_CloseArray(&cbor_ctx);
+
+    if (QCBOREncode_Finish(&cbor_ctx, pcbor)) {
+        printf("encoding CBOR resource failed\n");
+        return false;
+    }
+
+    return true;
+}
+
 static void attest(M2MResource *res, const uint8_t *challenge,
                    uint16_t challenge_sz) {
 #define MAX_ATTESTATION_TOKEN_SIZE (0x200)
@@ -140,7 +170,7 @@ static void attest(M2MResource *res, const uint8_t *challenge,
     printf("computing attestation resource\n");
     print_buf("challenge", challenge, challenge_sz);
 
-    static unsigned int s = 0;
+    static unsigned int s;
     uint8_t nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_32];
 
     if (!M(s++, challenge, challenge_sz, nonce)) {
@@ -171,9 +201,15 @@ static void attest(M2MResource *res, const uint8_t *challenge,
         return;
     }
 
-    // TODO(tho) compute aggregate resource {s, T}
+    UsefulBufC cbor;
 
-    (void)set_resource(res, t, t_sz);
+    // Compute aggregate resource {s, T}
+    if (!cbor_it(s, t, t_sz, &cbor)) {
+        printf("CBOR encoding\n");
+        return;
+    }
+
+    (void)set_resource(res, (const uint8_t *)cbor.ptr, cbor.len);
 }
 
 static bool extract_nonce(const uint8_t *b64, size_t b64_sz, uint8_t *nonce,
@@ -207,21 +243,17 @@ static bool extract_nonce(const uint8_t *b64, size_t b64_sz, uint8_t *nonce,
 }
 
 static void attested_sensor_reading_callback(void *) {
-    // clear previous result as soon as we receive a new request
-    attested_sensor_value_res->set_value(NULL, 0);
-
-    const uint8_t *nonce_b64 = attested_sensor_nonce_res->value();
-    const size_t nonce_b64_sz = attested_sensor_nonce_res->value_length();
-
     // use the largest possible nonce size (64 bytes)
     uint8_t nonce[PSA_INITIAL_ATTEST_CHALLENGE_SIZE_64];
     size_t nonce_sz = sizeof nonce;
 
-    if (!extract_nonce(nonce_b64, nonce_b64_sz, nonce, &nonce_sz)) {
+    // clear previous result as soon as we receive a new request
+    attested_sensor_value_res->set_value(NULL, 0);
+
+    if (!extract_nonce(attested_sensor_nonce_res->value(),
+                       attested_sensor_nonce_res->value_length(), nonce,
+                       &nonce_sz)) {
         printf("Failed extracting nonce from PUT request\n");
-        // XXX(tho) it looks like returning here leaves the resource in
-        // confused state... Pelion needs to timeout before it can
-        // request again.  TODO(tho) how do we send an error?
         return;
     }
 
@@ -308,7 +340,7 @@ static bool do_init(void) {
     }
 
     if (mcc_platform_init() != 0) {
-        printf("mcc_platform_init() failed!\n");
+        printf("mcc_platform_init() failed\n");
         return false;
     }
 
@@ -319,26 +351,48 @@ static bool do_init(void) {
         return false;
     }
 
-    printf("Network initialized.\n");
+    printf("Network initialized\n");
 
     if (!application_init()) {
-        printf("application_init() failed!\n");
+        printf("application_init() failed\n");
         return false;
     }
 
     return true;
 }
 
+static void do_register_resources(SimpleM2MClient &mbed_client) {
+    attested_sensor_nonce_res = mbed_client.add_cloud_resource(
+        33455, 0, 0, "attested_sensor_reading_nonce",
+        M2MResourceInstance::OPAQUE, M2MBase::PUT_ALLOWED, "", false,
+        (void *)attested_sensor_reading_callback, NULL);
+
+    attested_sensor_value_res = mbed_client.add_cloud_resource(
+        33455, 0, 1, "attested_sensor_reading_val", M2MResourceInstance::OPAQUE,
+        M2MBase::GET_ALLOWED, NULL, true, NULL,
+        (void *)notification_status_callback);
+
+    exec_attested_sensor_res = mbed_client.add_cloud_resource(
+        33455, 0, 2, "exec_attested_sensor", M2MResourceInstance::OPAQUE,
+        M2MBase::GET_POST_ALLOWED, NULL, true,
+        (void *)exec_attested_res_callback,
+        (void *)notification_status_callback);
+
+    exec_attested_sensor_res->set_delayed_response(true);
+
+    mbed_client.register_and_connect();
+}
+
 static void main_application(void) {
     if (!do_init()) {
-        printf("Initalization failed, exiting application!\n");
+        printf("Initalization failed, exiting application\n");
         return;
     }
 
     psa_status_t rc = psa_crypto_init();
     if (rc != PSA_SUCCESS) {
         printf("PSA crypto initialization failed with status %ld, exiting "
-               "application!\n",
+               "application\n",
                rc);
         return;
     }
@@ -347,25 +401,7 @@ static void main_application(void) {
     // server.
     SimpleM2MClient mbedClient;
 
-    attested_sensor_nonce_res = mbedClient.add_cloud_resource(
-        33455, 0, 0, "attested_sensor_reading_nonce",
-        M2MResourceInstance::OPAQUE, M2MBase::PUT_ALLOWED, "", false,
-        (void *)attested_sensor_reading_callback, NULL);
-
-    attested_sensor_value_res = mbedClient.add_cloud_resource(
-        33455, 0, 1, "attested_sensor_reading_val", M2MResourceInstance::OPAQUE,
-        M2MBase::GET_ALLOWED, NULL, true, NULL,
-        (void *)notification_status_callback);
-
-    exec_attested_sensor_res = mbedClient.add_cloud_resource(
-        33455, 0, 2, "exec_attested_sensor", M2MResourceInstance::OPAQUE,
-        M2MBase::GET_POST_ALLOWED, NULL, true,
-        (void *)exec_attested_res_callback,
-        (void *)notification_status_callback);
-
-    exec_attested_sensor_res->set_delayed_response(true);
-
-    mbedClient.register_and_connect();
+    do_register_resources(mbedClient);
 
     // Check if client is registering or registered, if true sleep and repeat.
     while (mbedClient.is_register_called()) {
