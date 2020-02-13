@@ -85,20 +85,20 @@ notification_status_callback(const M2MBase &object,
 
 static void print_buf(const char *label, const uint8_t *buf, uint32_t buf_sz) {
     printf("%s (@%p) (%lu bytes):\n", label, buf, buf_sz);
+
     for (uint32_t i = 0; i < buf_sz; i++)
         printf("%02x", buf[i]);
+
     printf("\n");
 }
 
-static bool set_resource(M2MResource *res, const uint8_t *token,
-                         size_t token_sz) {
-    print_buf("PSA token", token, token_sz);
+static bool set_resource(M2MResource *res, const uint8_t *bin, size_t bin_sz) {
+    print_buf("resource", bin, bin_sz);
 
-    uint8_t buf[1024];
-    size_t encoded_sz;
+    uint8_t b64[1024];
+    size_t b64_sz;
 
-    int rc =
-        mbedtls_base64_encode(buf, sizeof buf, &encoded_sz, token, token_sz);
+    int rc = mbedtls_base64_encode(b64, sizeof b64, &b64_sz, bin, bin_sz);
 
     switch (rc) {
     case MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL:
@@ -108,7 +108,7 @@ static bool set_resource(M2MResource *res, const uint8_t *token,
         break;
     }
 
-    res->set_value(buf, encoded_sz);
+    res->set_value(b64, b64_sz);
 
     return true;
 }
