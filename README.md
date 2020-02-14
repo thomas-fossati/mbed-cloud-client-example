@@ -2,6 +2,11 @@ The full documentation for this example is [available on our documentation site]
 
 ## LPC55S69
 
+```
+git clone -b LPC55S69 https://github.com/thomas-fossati/mbed-cloud-client-example.git
+cd mbed-cloud-client-example
+```
+
 Replace `mbed_cloud_dev_credentials.c` with your own credentials.
 
 ```
