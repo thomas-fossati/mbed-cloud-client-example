@@ -157,6 +157,8 @@ static bool mix(unsigned int s, const uint8_t *T, size_t T_sz,
         return false;
     }
 
+    printf("s=%s\n", sbuf);
+
     mbedtls_sha256_init(&c);
 
     if (mbedtls_sha256_starts_ret(&c, 0) || // bizarrely, 0 means SHA-256
@@ -204,7 +206,7 @@ static void attested_sensor_reading(M2MResource *res, const uint8_t *ch,
     printf("ch_sz=%zu\n", ch_sz);
     print_buf("ch", ch, ch_sz);
 
-    if (!mix(s++, ch, ch_sz, nonce)) {
+    if (!mix(++s, ch, ch_sz, nonce)) {
         printf("computing mix() failed\n");
         return;
     }
@@ -246,7 +248,7 @@ static bool extract_ch(const uint8_t *b64, size_t b64_sz, uint8_t *bin,
                        size_t *pbin_sz) {
     size_t bin_sz;
 
-    printf("base64 ch: %s\n", b64);
+    print_buf("ch", b64, b64_sz);
 
     switch (mbedtls_base64_decode(bin, *pbin_sz, &bin_sz, b64, b64_sz)) {
     case MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL:
@@ -263,25 +265,16 @@ static bool extract_ch(const uint8_t *b64, size_t b64_sz, uint8_t *bin,
 }
 
 static void attested_sensor_reading_callback(void *) {
-    // use the largest possible nonce size (64 bytes)
-    uint8_t nonce[64];
-    size_t nonce_sz = sizeof nonce;
-
     // clear previous result as soon as we receive a new request
     attested_sensor_value_res->set_value(NULL, 0);
 
-    if (!extract_ch(attested_sensor_nonce_res->value(),
-                    attested_sensor_nonce_res->value_length(), nonce,
-                    &nonce_sz)) {
-        printf("Failed extracting nonce from PUT request\n");
-        return;
-    }
-
-    attested_sensor_reading(attested_sensor_value_res, nonce, nonce_sz);
+    attested_sensor_reading(attested_sensor_value_res,
+                            attested_sensor_nonce_res->value(),
+                            attested_sensor_nonce_res->value_length());
 }
 
-// Extract base64 encoded challenge from Execute parameters
-// Expects "ch=<base64 value>"
+// Extract challenge from Execute parameters
+// Expects "ch=<value>"
 static bool extract_ch_from_exec_params(const uint8_t *args, uint16_t args_sz,
                                         uint8_t *bin, size_t *pbin_sz) {
     const char *ch_key = "ch=";
@@ -298,10 +291,10 @@ static bool extract_ch_from_exec_params(const uint8_t *args, uint16_t args_sz,
         return false;
     }
 
-    const uint8_t *ch = args + strlen(ch_key);
-    uint16_t ch_sz = args_sz - strlen(ch_key);
+    bin = (uint8_t *)args + strlen(ch_key);
+    *pbin_sz = args_sz - strlen(ch_key);
 
-    return extract_ch(ch, ch_sz, bin, pbin_sz);
+    return true;
 }
 
 static void exec_attested_res_callback(void *args) {
