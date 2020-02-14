@@ -21,6 +21,7 @@
 #include "mcc_common_button_and_led.h"
 #include "psa/crypto.h"
 #include "psa/error.h"
+#include "psa_attest_inject_key.h"
 #include "psa_initial_attestation_api.h"
 #include "simplem2mclient.h"
 #include <mbedtls/base64.h>
@@ -31,6 +32,11 @@ extern "C" {
 #include "mbed-os/components/TARGET_PSA/services/attestation/qcbor/inc/useful_buf.h"
 }
 
+static const uint8_t pri_key[] = {
+    0x49, 0xc9, 0xa8, 0xc1, 0x8c, 0x4b, 0x88, 0x56, 0x38, 0xc4, 0x31,
+    0xcf, 0x1d, 0xf1, 0xc9, 0x94, 0x13, 0x16, 0x09, 0xb5, 0x80, 0xd4,
+    0xfd, 0x43, 0xa0, 0xca, 0xb1, 0x7d, 0xb2, 0xf1, 0x3e, 0xee};
+
 static void main_application(void);
 
 int main(void) { return mcc_platform_run_program(main_application); }
@@ -39,6 +45,44 @@ int main(void) { return mcc_platform_run_program(main_application); }
 static M2MResource *attested_sensor_nonce_res;
 static M2MResource *attested_sensor_value_res;
 static M2MResource *exec_attested_sensor_res;
+
+static void print_buf(const char *label, const uint8_t *buf, uint32_t buf_sz) {
+    printf("%s (@%p) (%lu bytes):\n", label, buf, buf_sz);
+
+    for (uint32_t i = 0; i < buf_sz; i++)
+        printf("%02x", buf[i]);
+
+    printf("\n");
+}
+
+static bool psa_init(void) {
+    psa_status_t rc = psa_crypto_init();
+    if (rc != PSA_SUCCESS) {
+        printf("psa_crypto_init() failed with status %ld\n", rc);
+        return false;
+    }
+
+    uint8_t pub_key[65];
+    unsigned int pub_key_sz = 0;
+
+    rc = psa_attestation_inject_key(
+        pri_key, sizeof pri_key,
+        PSA_KEY_TYPE_ECC_KEYPAIR(PSA_ECC_CURVE_SECP256R1), pub_key,
+        sizeof pub_key, &pub_key_sz);
+
+    switch (rc) {
+    case PSA_SUCCESS:
+        print_buf("IAK pub", pub_key, pub_key_sz);
+    case PSA_ERROR_OCCUPIED_SLOT:
+        // It's OK if the key already exist (it means we've already been here)
+        break;
+    default:
+        printf("psa_attestation_inject_key() failed with status %ld\n", rc);
+        return false;
+    }
+
+    return true;
+}
 
 static void
 notification_status_callback(const M2MBase &object,
@@ -81,15 +125,6 @@ notification_status_callback(const M2MBase &object,
     default:
         break;
     }
-}
-
-static void print_buf(const char *label, const uint8_t *buf, uint32_t buf_sz) {
-    printf("%s (@%p) (%lu bytes):\n", label, buf, buf_sz);
-
-    for (uint32_t i = 0; i < buf_sz; i++)
-        printf("%02x", buf[i]);
-
-    printf("\n");
 }
 
 static bool set_resource(M2MResource *res, const uint8_t *bin, size_t bin_sz) {
@@ -354,16 +389,8 @@ static void do_register_resources(SimpleM2MClient &mbed_client) {
 }
 
 static void main_application(void) {
-    if (!do_init()) {
+    if (!psa_init() || !do_init()) {
         printf("Initalization failed, exiting application\n");
-        return;
-    }
-
-    psa_status_t rc = psa_crypto_init();
-    if (rc != PSA_SUCCESS) {
-        printf("PSA crypto initialization failed with status %ld, exiting "
-               "application\n",
-               rc);
         return;
     }
 
