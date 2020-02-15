@@ -17,7 +17,7 @@ Change `nsapi.default-wifi-ssid` and `nsapi.default-wifi-password` in `mbed_app.
 mbed compile -t GCC_ARM -m LPC55S69_NS --profile release
 ```
 
-On Unices:
+On Unices (MacOSX and Linux):
 ```
 dd if=BUILD/LPC55S69_NS/GCC_ARM-RELEASE/mbed-cloud-client-example.hex of=/Volumes/LPC55S69/mbed.hex conv=notrunc && sync
 ```
