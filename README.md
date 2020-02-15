@@ -11,7 +11,12 @@ Replace `mbed_cloud_dev_credentials.c` with your own credentials.
 
 ```
 mbed deploy
-mbed compile -t GCC_ARM -m LPC55S69_NS --profile release --app-config sdio-glue/configs/mbed-cloud-client-example.json
+```
+
+Change `nsapi.default-wifi-ssid` and `nsapi.default-wifi-password` in `mbed_app.json` to match your local WiFi attachment.
+
+```
+mbed compile -t GCC_ARM -m LPC55S69_NS --profile release
 ```
 
 On Unices:
