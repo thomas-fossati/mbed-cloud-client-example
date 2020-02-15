@@ -1,6 +1,4 @@
-The full documentation for this example is [available on our documentation site](https://cloud.mbed.com/docs/current/connecting/device-management-client-tutorials.html)
-
-## LPC55S69
+## An attestation demo on LPC55S69 boards
 
 ```
 git clone -b LPC55S69 https://github.com/thomas-fossati/mbed-cloud-client-example.git
@@ -13,7 +11,7 @@ Replace `mbed_cloud_dev_credentials.c` with your own credentials.
 mbed deploy
 ```
 
-Change `nsapi.default-wifi-ssid` and `nsapi.default-wifi-password` in `mbed_app.json` to match your local WiFi attachment.
+Change `nsapi.default-wifi-ssid` and `nsapi.default-wifi-password` in `mbed_app.json` to match your local WiFi settings.
 
 ```
 mbed compile -t GCC_ARM -m LPC55S69_NS --profile release
