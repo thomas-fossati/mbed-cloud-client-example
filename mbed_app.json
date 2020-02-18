@@ -24,8 +24,8 @@
       "events.shared-eventsize": 1536,
       "mbed-trace.enable": null,
       "nsapi.default-wifi-security": "WPA_WPA2",
-      "nsapi.default-wifi-ssid": "\"SSID\"",
-      "nsapi.default-wifi-password": "\"PASSWORD\""
+      "nsapi.default-wifi-ssid": "\"NETGEAR19\"",
+      "nsapi.default-wifi-password": "\"happywater154\""
     },
     "LPC55S69_NS": {
       "mbed-cloud-client.update-storage": "ARM_UCP_FLASHIAP_BLOCKDEVICE",
